@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Fault-Tolerant URL Shortener — Dashboard</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; background: #0f1117; color: #e5e7eb; }
+  h1 { font-size: 22px; }
+  .nodes { display: flex; gap: 16px; margin: 24px 0; }
+  .node-box { flex: 1; padding: 16px; border-radius: 8px; border: 2px solid #333; text-align: center; transition: all 0.3s; }
+  .node-box.leader { border-color: #22c55e; background: #052e16; }
+  .node-box.follower { border-color: #3b82f6; background: #0c1e3e; }
+  .node-box.dead { border-color: #ef4444; background: #2e0a0a; opacity: 0.6; }
+  .node-box h3 { margin: 0 0 8px 0; }
+  .role-tag { font-size: 12px; padding: 2px 8px; border-radius: 4px; font-weight: bold; }
+  .role-tag.leader { background: #22c55e; color: #052e16; }
+  .role-tag.follower { background: #3b82f6; color: #0c1e3e; }
+  .role-tag.dead { background: #ef4444; color: white; }
+  .shorten-box { background: #1a1d29; padding: 20px; border-radius: 8px; margin: 24px 0; }
+  input[type=text] { width: 60%; padding: 8px; border-radius: 4px; border: 1px solid #444; background: #0f1117; color: white; }
+  button { padding: 8px 16px; border-radius: 4px; border: none; cursor: pointer; font-weight: bold; }
+  .btn-shorten { background: #3b82f6; color: white; }
+  .btn-kill { background: #ef4444; color: white; margin-top: 8px; }
+  #result { margin-top: 12px; font-size: 14px; }
+  #result a { color: #60a5fa; }
+  .log { font-size: 12px; color: #888; margin-top: 20px; max-height: 150px; overflow-y: auto; }
+</style>
+</head>
+<body>
+
+<h1>Fault-Tolerant URL Shortener</h1>
+<p style="color:#888">Distributed across 3 nodes with automatic leader election on failure.</p>
+
+<div class="nodes" id="nodes"></div>
+
+<div class="shorten-box">
+  <input type="text" id="urlInput" placeholder="Paste a long URL here...">
+  <button class="btn-shorten" onclick="shortenUrl()">Shorten</button>
+  <div id="result"></div>
+  <br>
+  <button class="btn-kill" onclick="killLeader()">💥 Kill Current Leader (simulate crash)</button>
+</div>
+
+<div class="log" id="eventLog"></div>
+
+<script>
+const NODES = [
+  { id: 0, url: "http://localhost:8000" },
+  { id: 1, url: "http://localhost:8001" },
+  { id: 2, url: "http://localhost:8002" },
+];
+
+let nodeState = {}; // id -> {role, alive}
+
+function logEvent(msg) {
+  const el = document.getElementById("eventLog");
+  const time = new Date().toLocaleTimeString();
+  el.innerHTML = `[${time}] ${msg}<br>` + el.innerHTML;
+}
+
+async function pollHealth() {
+  for (const node of NODES) {
+    try {
+      const res = await fetch(`${node.url}/health`, { signal: AbortSignal.timeout(1000) });
+      const data = await res.json();
+      const prevRole = nodeState[node.id]?.role;
+      nodeState[node.id] = { role: data.role, alive: true };
+      if (prevRole && prevRole !== data.role) {
+        logEvent(`Node ${node.id} changed role: ${prevRole} → ${data.role}`);
+      }
+    } catch (e) {
+      const wasAlive = nodeState[node.id]?.alive;
+      nodeState[node.id] = { role: null, alive: false };
+      if (wasAlive !== false) {
+        logEvent(`Node ${node.id} is unreachable (down)`);
+      }
+    }
+  }
+  renderNodes();
+}
+
+function renderNodes() {
+  const container = document.getElementById("nodes");
+  container.innerHTML = "";
+  for (const node of NODES) {
+    const state = nodeState[node.id] || { alive: false };
+    const cls = !state.alive ? "dead" : state.role;
+    const label = !state.alive ? "DEAD" : state.role.toUpperCase();
+    container.innerHTML += `
+      <div class="node-box ${cls}">
+        <h3>Node ${node.id}</h3>
+        <span class="role-tag ${cls}">${label}</span>
+        <p style="font-size:12px;color:#888;margin-top:8px">${node.url}</p>
+      </div>
+    `;
+  }
+}
+
+function currentLeaderUrl() {
+  const leaderEntry = Object.entries(nodeState).find(([id, s]) => s.alive && s.role === "leader");
+  if (!leaderEntry) return null;
+  const leaderId = parseInt(leaderEntry[0]);
+  return NODES.find(n => n.id === leaderId)?.url;
+}
+
+async function shortenUrl() {
+  const url = document.getElementById("urlInput").value.trim();
+  const resultEl = document.getElementById("result");
+  if (!url) { resultEl.innerText = "Enter a URL first."; return; }
+
+  const leaderUrl = currentLeaderUrl();
+  if (!leaderUrl) { resultEl.innerText = "No leader currently available!"; return; }
+
+  try {
+    const res = await fetch(`${leaderUrl}/shorten`, {
+    method: "POST",
+    headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": "dev-secret-key"
+    },
+    body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    const shortLink = `${leaderUrl}/${data.short_code}`;
+    resultEl.innerHTML = `Short link: <a href="${shortLink}" target="_blank">${shortLink}</a>`;
+    logEvent(`Shortened via node → code ${data.short_code}`);
+  } catch (e) {
+    resultEl.innerText = "Failed to shorten — leader may be down, try again in a moment.";
+  }
+}
+
+async function killLeader() {
+  const leaderUrl = currentLeaderUrl();
+  if (!leaderUrl) { logEvent("No leader to kill right now."); return; }
+  logEvent(`Sending kill signal to leader at ${leaderUrl}...`);
+  try {
+    await fetch(`${leaderUrl}/kill`, { method: "POST", signal: AbortSignal.timeout(1000) });
+  } catch (e) {
+    // expected — the node dies before responding cleanly sometimes
+  }
+  logEvent("Kill signal sent. Watching for election...");
+}
+
+setInterval(pollHealth, 1000);
+pollHealth();
+</script>
+
+</body>
+</html>

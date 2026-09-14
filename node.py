@@ -2,16 +2,28 @@ import time
 import string
 import random
 import threading
+import os
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+API_KEY = os.environ.get("KV_API_KEY", "dev-secret-key")
+
 ROLE = "leader"          
 NODE_ID = 0
-ALL_NODES: dict[int, str] = {}   
+ALL_NODES: dict[int, str] = {}  
+LEADER_ID = 0            
 
 HEARTBEAT_INTERVAL = 0.5  
 MISSED_HEARTBEAT_LIMIT = 3
@@ -56,7 +68,10 @@ def peers_excluding_self() -> dict[int, str]:
 
 
 @app.post("/shorten")
-def shorten(body: ShortenRequest):
+def shorten(body: ShortenRequest, x_api_key: str = Header(None)):
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
     if ROLE != "leader":
         raise HTTPException(
             status_code=403,
@@ -90,6 +105,16 @@ def replicate(body: ReplicateRequest):
         raise HTTPException(status_code=403, detail="Leader does not accept /replicate calls")
     apply_write(body.code, body.url, body.timestamp)
     return {"status": "replicated", "code": body.code}
+
+
+@app.post("/kill")
+def kill():
+    """Simulates a hard crash for demo purposes — forcibly exits the
+    process without graceful shutdown, mimicking a real crash rather
+    than a clean stop."""
+    print(f"[DEMO] Node {NODE_ID} received /kill — simulating a crash NOW")
+    threading.Timer(0.1, lambda: os._exit(1)).start()
+    return {"status": "dying"}
 
 
 @app.get("/log")
@@ -164,7 +189,7 @@ def trigger_election():
     alive_nodes = [NODE_ID] 
     for nid, addr in peers_excluding_self().items():
         if nid == LEADER_ID:
-            continue 
+            continue  
         try:
             resp = requests.get(f"{addr}/health", timeout=0.4)
             if resp.status_code == 200:
